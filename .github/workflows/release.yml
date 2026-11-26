@@ -1,16 +1,11 @@
 name: Release (fork)
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       tag:
         description: Fork release tag
         required: true
-        default: v1.14.2-security.1
 
 permissions:
   contents: read
@@ -19,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || 'v1.14.2-security.1' }}
+  RELEASE_TAG: ${{ inputs.tag }}
   GOTOOLCHAIN: local
   CGO_ENABLED: '0'
 
@@ -27,6 +22,7 @@ jobs:
   build:
     if: github.repository == 'lorenz-werner/helm-docs' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout exact release source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -36,6 +32,17 @@ jobs:
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
+      - name: Reject existing tags or releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-security\.[0-9]+$ ]]
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release or tag already exists; choose a new tag."
+            exit 1
+          fi
       - name: Validate release tag and locked dependencies
         run: |
           set -euo pipefail
@@ -65,8 +72,22 @@ jobs:
           go version -m staging/helm-docs > release/go-buildinfo.txt
           cp LICENSE README.md staging/
           tar -C staging -czf "release/helm-docs_${version}_Linux_x86_64.tar.gz" helm-docs LICENSE README.md
-          (cd release && sha256sum *.tar.gz go-buildinfo.txt > checksums.txt)
           git diff --exit-code -- go.mod go.sum
+      - name: Generate CycloneDX SBOM from release binary
+        env:
+          SYFT_VERSION: 1.57.2
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          archive="syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          base="https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}"
+          curl --fail --location --retry 3 "$base/$archive" -o "$work/$archive"
+          curl --fail --location --retry 3 "$base/syft_${SYFT_VERSION}_checksums.txt" -o "$work/upstream-checksums.txt"
+          (cd "$work" && awk -v name="$archive" '$2 == name || $2 == "*" name {print}' upstream-checksums.txt > selected-checksum.txt && sha256sum -c selected-checksum.txt)
+          tar -xzf "$work/$archive" -C "$work" syft
+          "$work/syft" scan file:staging/helm-docs -o cyclonedx-json=release/sbom.cdx.json
+          jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release/sbom.cdx.json
+          (cd release && sha256sum *.tar.gz go-buildinfo.txt sbom.cdx.json > checksums.txt)
       - uses: actions/upload-artifact@v4
         with:
           name: fork-release-assets
@@ -91,11 +112,11 @@ jobs:
         run: |
           set -euo pipefail
           (cd release && sha256sum -c checksums.txt)
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release already exists; refusing to replace it."
             exit 1
           fi
           gh release create "$RELEASE_TAG" release/* \
             --target "$GITHUB_SHA" \
             --title "helm-docs $RELEASE_TAG" \
-            --notes "Unofficial security build from this fork. Uses the locked Go modules in the tagged source. Linux amd64 archive, SHA-256 checksums and Go build information. Unit tests, chart regression tests, Gosec and source/binary govulncheck must pass before publication. Upstream release channels are not used."
+            --notes "Unofficial security build from this fork. Uses the locked Go modules in the tagged source. Linux amd64 archive, SHA-256 checksums, Go build information and CycloneDX SBOM. Unit tests, chart regression tests, Gosec and source/binary govulncheck must pass before publication. Upstream release channels are not used."

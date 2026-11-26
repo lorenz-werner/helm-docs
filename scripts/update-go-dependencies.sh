@@ -7,7 +7,6 @@ export GOTOOLCHAIN=local
 # Keep the existing module paths (including Helm v3).
 # Major-version migrations require separate source changes.
 go version
-go get go@1.27.4
 go get -u -t ./...
 go mod tidy
 go mod verify

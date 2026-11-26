@@ -1,36 +1,89 @@
 name: Security dependency refresh
+
 on:
   push:
-    branches: [security/dependency-updates]
-    paths:
-      - '.github/workflows/security-dependencies.yml'
-      - 'scripts/update-go-dependencies.sh'
+    branches: [master, security/dependency-updates]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '23 5 * * *'
   workflow_dispatch:
+    inputs:
+      refresh:
+        description: Resolve compatible dependency updates and export candidate files (no commits)
+        type: boolean
+        default: false
+
 permissions:
   contents: read
+
 jobs:
-  resolve:
+  scan:
+    if: github.repository == 'lorenz-werner/helm-docs'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version: '1.27.4'
+          go-version-file: go.mod
+      - name: Verify locked dependencies and build
+        run: |
+          go mod download
+          go mod verify
+          go test -mod=readonly ./...
+          go build -mod=readonly -trimpath -o "$RUNNER_TEMP/helm-docs" ./cmd/helm-docs
+          git diff --exit-code -- go.mod go.sum
+      - name: Install vulnerability scanner
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+      - name: Scan source
+        run: |
+          set -o pipefail
+          "$(go env GOPATH)/bin/govulncheck" ./... | tee "$RUNNER_TEMP/govulncheck-source.txt"
+      - name: Scan binary
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          "$(go env GOPATH)/bin/govulncheck" -mode=binary "$RUNNER_TEMP/helm-docs" | tee "$RUNNER_TEMP/govulncheck-binary.txt"
+      - name: Archive security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: ${{ runner.temp }}/govulncheck-*.txt
+
+  refresh:
+    if: github.repository == 'lorenz-werner/helm-docs' && github.event_name == 'workflow_dispatch' && inputs.refresh && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
           cache: false
-      - name: Resolve, test and build
+      - name: Resolve, test and build candidate
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash scripts/update-go-dependencies.sh
-      - name: Upload resolved dependencies and binary
+      - name: Scan candidate
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          "$(go env GOPATH)/bin/govulncheck" -mode=binary "$RUNNER_TEMP/helm-docs-security"
+      - name: Upload candidate (review before committing)
         uses: actions/upload-artifact@v4
         with:
           name: resolved-dependencies
           path: |
             go.mod
             go.sum
-            /tmp/helm-docs-security
-      - name: Vulnerability scan
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-          govulncheck -mode=binary /tmp/helm-docs-security
+            ${{ runner.temp }}/helm-docs-security
+          if-no-files-found: error
