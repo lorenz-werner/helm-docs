@@ -25,7 +25,7 @@ env:
 
 jobs:
   build:
-    if: github.repository == 'DerBunman/helm-docs' && github.ref == 'refs/heads/master'
+    if: github.repository == 'lorenz-werner/helm-docs' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact release source
@@ -75,7 +75,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.repository == 'DerBunman/helm-docs' && github.ref == 'refs/heads/master'
+    if: github.repository == 'lorenz-werner/helm-docs' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
